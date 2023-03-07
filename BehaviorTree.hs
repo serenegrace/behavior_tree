@@ -3,125 +3,232 @@ module BehaviorTree where
 data NodeStatus = Success | Running | Failure | Invalid
   deriving (Enum, Eq, Show)
 
-data LastRunStatusTree = LastRunStatusTree
+data MemoryTree = MemoryTree
   { val :: NodeStatus
-  , subTree :: [LastRunStatusTree]
+  , subTree :: [MemoryTree]
   } deriving (Show)
 
 type Environment = [Int]
 
 type Codes = [Int]
 
-type StatusCodeRunning = (NodeStatus, (Codes, LastRunStatusTree))
+type TreeOutput = (NodeStatus, Codes, Environment, MemoryTree, MemoryTree)
 
-type StatusCodeRunningchildren = (NodeStatus, (Codes, [LastRunStatusTree]))
-
-data Memory = TrueMemory | PartialMemory | NoMemory
-  deriving (Enum, Eq, Show)
+type NodeOutput = (NodeStatus, Codes, Environment, [MemoryTree], [MemoryTree])
 
 data Node =  Node
-  { evalFunc :: [Node] -> NodeStatus -> [LastRunStatusTree] -> Environment -> Codes -> StatusCodeRunningchildren
-  , memory :: Memory
+  { evalFunc :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput
   , children :: [Node]
   }
   
 ----------------------------End of data declarations
 
-statusFromC :: StatusCodeRunningchildren -> NodeStatus
-statusFromC = fst
+getStatus :: (a, b, c, d, e) -> a
+getStatus (status, _, _, _, _) = status
 
-codesFromC :: StatusCodeRunningchildren -> Codes
-codesFromC scr = fst (snd scr)
+getCodes :: (a, b, c, d, e) -> b
+getCodes (_, codes, _, _, _) = codes
 
-treeFromC :: StatusCodeRunningchildren -> [LastRunStatusTree]
-treeFromC scr = snd (snd scr)
+getTreeEnvironment :: (a, b, c, d, e) -> c
+getTreeEnvironment (_, _, environment, _, _) = environment
 
-statusFrom :: StatusCodeRunning -> NodeStatus
-statusFrom = fst
+getMemory :: (a, b, c, d, e) -> d
+getMemory (_, _, _, memory, _) = memory
 
-codesFrom :: StatusCodeRunning -> Codes
-codesFrom scr = fst (snd scr)
+getPartial :: (a, b, c, d, e) -> e
+getPartial (_, _, _, _,  partial) = partial
 
-treeFrom :: StatusCodeRunning -> LastRunStatusTree
-treeFrom scr = snd (snd scr)
-
-allInvalid :: Node -> LastRunStatusTree
+allInvalid :: Node -> MemoryTree
 allInvalid node
-  | null (children node) = LastRunStatusTree Invalid []
-  | otherwise = LastRunStatusTree Invalid (map allInvalid (children node))
+  | null (children node) = MemoryTree Invalid []
+  | otherwise = MemoryTree Invalid (map allInvalid (children node))
+
+
+childrenInvalid :: Node -> NodeStatus -> MemoryTree
+childrenInvalid node status
+  | null (children node) = MemoryTree status []
+  | otherwise = MemoryTree status (map allInvalid (children node))
 
 ----------------------------End of data manipulators
 
 
 
-evaluateTree :: Node -> LastRunStatusTree -> Environment -> Codes -> StatusCodeRunning
-evaluateTree node tree environment codes = (newStatus, (newCodes, newTree))
-  where result = evalFunc node (children node) (val tree) (subTree tree) environment codes
-        newStatus = statusFromC result
-        newCodes = codesFromC result
-        newTree = LastRunStatusTree newStatus (treeFromC result)
+evaluateTree :: Node -> MemoryTree -> MemoryTree -> Environment -> TreeOutput
+evaluateTree node memoryTree partialTree environment = evaluateNode node memoryTree partialTree environment []
 
 
-selectorFunc :: [Node] -> NodeStatus -> [LastRunStatusTree] -> Environment -> Codes -> StatusCodeRunningchildren
-selectorFunc children lastStatus childrenTree environment codes
-  | null children  = (Failure, (codes, []))
-  | otherwise = (newStatus, (newCodes, newTree))
-  where result = evaluateTree (head children) (head childrenTree) environment codes
-        nextResult = if statusFrom result == Failure then selectorFunc (tail children) lastStatus (tail childrenTree) environment (codesFrom result)
-          else (Invalid, (codes, tail childrenTree))
-        newStatus = if statusFrom result == Failure then statusFromC nextResult
-          else statusFrom result
-        newCodes = if statusFrom result == Failure then codesFromC nextResult
-          else codesFrom result
-        newTree = treeFrom result : treeFromC nextResult
+evaluateNode :: Node -> MemoryTree -> MemoryTree -> Environment -> Codes -> TreeOutput
+evaluateNode node memoryTree partialTree environment codes = (newStatus, newCodes, newEnvironment, newMemory, newPartial)
+  where result = evalFunc node (children node) (val memoryTree) (subTree memoryTree) (val partialTree) (subTree partialTree) environment codes
+        newStatus = getStatus result
+        newCodes = getCodes result
+        newEnvironment = getTreeEnvironment result
+        newMemory = MemoryTree newStatus (getMemory result)
+        newPartial
+          | newStatus == Running = MemoryTree newStatus (getPartial result)
+          | otherwise = childrenInvalid node newStatus
 
-selectorMemoryFunc :: [Node] -> NodeStatus -> [LastRunStatusTree] -> Environment -> Codes -> StatusCodeRunningchildren
-selectorMemoryFunc children lastStatus childrenTree environment codes
-  | null children  = (Failure, (codes, []))
-  | lastStatus == Running && val (head childrenTree) /= Running = (statusFromC nextResult, (codesFromC nextResult, head childrenTree : treeFromC nextResult))
-  | otherwise = (newStatus, (newCodes, newTree))
-  where result = evaluateTree (head children) (head childrenTree) environment codes
-        nextResult = if statusFrom result == Failure then selectorMemoryFunc (tail children) lastStatus (tail childrenTree) environment (codesFrom result)
-          else (Invalid, (codes, tail childrenTree))
-        newStatus = if statusFrom result == Failure then statusFromC nextResult
-          else statusFrom result
-        newCodes = if statusFrom result == Failure then codesFromC nextResult
-          else codesFrom result
-        newTree = treeFrom result : treeFromC nextResult
+
+--START OF SELECTOR
+
+selectorFunc :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput
+selectorFunc children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children  = (Failure, codes, environment, [], []) -- base case of no more children
+  | otherwise = (getStatus nextResult, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes --run current child
+        nextResult
+          | getStatus result == Failure = selectorFunc (tail children) memoryStatus (tail memoryTree) partialStatus (tail partialTree) environment (getCodes result) --run next child, because we aren't finished
+          | otherwise = (getStatus result, getCodes result, getTreeEnvironment result, tail memoryTree, tail partialTree) --we finished.
+        newMemory = getMemory result : getMemory nextResult --compile memory
+        newPartial = getPartial result : getPartial nextResult --compile partial
+
+
+selectorMemoryFunc :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput
+selectorMemoryFunc children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children  = (Failure, codes, environment, [], []) -- base case of no more children
+  | otherwise = (getStatus nextResult, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result
+          | memoryStatus == Running && val (head memoryTree) /= Running = (val (head memoryTree), codes, environment, head memoryTree, head partialTree) --skip this child because we need to resume from the child that returned running
+          | otherwise = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes --run current child
+        newMemoryStatus -- this is used to ensure we stop skipping after we find the child that returned running
+          | memoryStatus == Running && val (head memoryTree) == Running = Invalid --since we found the child that returned running, we now swap this to invalid
+          | otherwise = memoryStatus
+        nextResult
+          | getStatus result == Failure = selectorMemoryFunc (tail children) newMemoryStatus (tail memoryTree) partialStatus (tail partialTree) environment (getCodes result) --run next child, because we aren't finished
+          | otherwise = (getStatus result, getCodes result, getTreeEnvironment result, tail memoryTree, tail partialTree) --we finished.
+        newMemory = getMemory result : getMemory nextResult --compile memory
+        newPartial = getPartial result : getPartial nextResult --compile partial
+
+
+selectorPartialFunc :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput
+selectorPartialFunc children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children  = (Failure, codes, environment, [], []) -- base case of no more children
+  | otherwise = (getStatus nextResult, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result
+          | partialStatus == Running && val (head partialTree) /= Running = (val (head partialTree), codes, environment, head memoryTree, head partialTree) --skip this child because we need to resume from the child that returned running
+          | otherwise = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes --run current child
+        newPartialStatus -- this is used to ensure we stop skipping after we find the child that returned running
+          | partialStatus == Running && val (head partialTree) == Running = Invalid --since we found the child that returned running, we now swap this to invalid
+          | otherwise = partialStatus
+        nextResult
+          | getStatus result == Failure = selectorPartialFunc (tail children) memoryStatus (tail memoryTree) newPartialStatus (tail partialTree) environment (getCodes result) --run next child, because we aren't finished
+          | otherwise = (getStatus result, getCodes result, getTreeEnvironment result, tail memoryTree, tail partialTree) --we finished.
+        newMemory = getMemory result : getMemory nextResult --compile memory
+        newPartial = getPartial result : getPartial nextResult --compile partial
+-- END OF SELECTOR
+-- START OF SEQUENCE
+sequenceFunc :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput
+sequenceFunc children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children  = (Success, codes, environment, [], []) -- base case of no more children
+  | otherwise = (getStatus nextResult, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes --run current child
+        nextResult
+          | getStatus result == Success = sequenceFunc (tail children) memoryStatus (tail memoryTree) partialStatus (tail partialTree) environment (getCodes result) --run next child, because we aren't finished
+          | otherwise = (getStatus result, getCodes result, getTreeEnvironment result, tail memoryTree, tail partialTree) --we finished.
+        newMemory = getMemory result : getMemory nextResult --compile memory
+        newPartial = getPartial result : getPartial nextResult --compile partial
+
+
+sequenceMemoryFunc :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput
+sequenceMemoryFunc children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children  = (Success, codes, environment, [], []) -- base case of no more children
+  | otherwise = (getStatus nextResult, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result
+          | memoryStatus == Running && val (head memoryTree) /= Running = (val (head memoryTree), codes, environment, head memoryTree, head partialTree) --skip this child because we need to resume from the child that returned running
+          | otherwise = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes --run current child
+        newMemoryStatus -- this is used to ensure we stop skipping after we find the child that returned running
+          | memoryStatus == Running && val (head memoryTree) == Running = Invalid --since we found the child that returned running, we now swap this to invalid
+          | otherwise = memoryStatus
+        nextResult
+          | getStatus result == Success = sequenceMemoryFunc (tail children) newMemoryStatus (tail memoryTree) partialStatus (tail partialTree) environment (getCodes result) --run next child, because we aren't finished
+          | otherwise = (getStatus result, getCodes result, getTreeEnvironment result, tail memoryTree, tail partialTree) --we finished.
+        newMemory = getMemory result : getMemory nextResult --compile memory
+        newPartial = getPartial result : getPartial nextResult --compile partial
+
+
+sequencePartialFunc :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput
+sequencePartialFunc children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children  = (Success, codes, environment, [], []) -- base case of no more children
+  | otherwise = (getStatus nextResult, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result
+          | partialStatus == Running && val (head partialTree) /= Running = (val (head partialTree), codes, environment, head memoryTree, head partialTree) --skip this child because we need to resume from the child that returned running
+          | otherwise = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes --run current child
+        newPartialStatus -- this is used to ensure we stop skipping after we find the child that returned running
+          | partialStatus == Running && val (head partialTree) == Running = Invalid --since we found the child that returned running, we now swap this to invalid
+          | otherwise = partialStatus
+        nextResult
+          | getStatus result == Success = sequencePartialFunc (tail children) memoryStatus (tail memoryTree) newPartialStatus (tail partialTree) environment (getCodes result) --run next child, because we aren't finished
+          | otherwise = (getStatus result, getCodes result, getTreeEnvironment result, tail memoryTree, tail partialTree) --we finished.
+        newMemory = getMemory result : getMemory nextResult --compile memory
+        newPartial = getPartial result : getPartial nextResult --compile partial
+--END OF SEQUENCE
+--START OF PARALLEL BASE
+parallelBase :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> ([NodeStatus], Codes, Environment, [MemoryTree], [MemoryTree])
+parallelBase children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children = ([], codes, environment, [], [])
+  | otherwise = (newStatuses, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes
+        nextResult = parallelBase (tail children) memoryStatus (tail memoryTree) partialStatus (tail partialTree) environment (getCodes result)
+        newStatuses = getStatus result : getStatus nextResult
+        newMemory = getMemory result : getMemory nextResult
+        newPartial = getPartial result : getPartial nextResult
+
+
+parallelMemoryBase :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> ([NodeStatus], Codes, Environment, [MemoryTree], [MemoryTree])
+parallelMemoryBase children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children = ([], codes, environment, [], [])
+  | otherwise = (newStatuses, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result
+          | memoryStatus == Running && val (head memoryTree) /= Running = (val (head memoryTree), codes, environment, head memoryTree, head partialTree)
+          | otherwise = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes
+        nextResult = parallelMemoryBase (tail children) memoryStatus (tail memoryTree) partialStatus (tail partialTree) environment (getCodes result)
+        newStatuses = getStatus result : getStatus nextResult
+        newMemory = getMemory result : getMemory nextResult
+        newPartial = getPartial result : getPartial nextResult
+
+
+parallelPartialBase :: [Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> ([NodeStatus], Codes, Environment, [MemoryTree], [MemoryTree])
+parallelPartialBase children memoryStatus memoryTree partialStatus partialTree environment codes
+  | null children = ([], codes, environment, [], [])
+  | otherwise = (newStatuses, getCodes nextResult, getTreeEnvironment nextResult, newMemory, newPartial)
+  where result
+          | partialStatus == Running && val (head partialTree) /= Running = (val (head partialTree), codes, environment, head memoryTree, head partialTree)
+          | otherwise = evaluateNode (head children) (head memoryTree) (head partialTree) environment codes
+        nextResult = parallelPartialBase (tail children) memoryStatus (tail memoryTree) partialStatus (tail partialTree) environment (getCodes result)
+        newStatuses = getStatus result : getStatus nextResult
+        newMemory = getMemory result : getMemory nextResult
+        newPartial = getPartial result : getPartial nextResult
+
         
-
-sequenceFunc :: [Node] -> NodeStatus -> [LastRunStatusTree] -> Environment -> Codes -> StatusCodeRunningchildren
-sequenceFunc children lastStatus childrenTree environment codes
-  | null children  = (Success, (codes, []))
-  | otherwise = (newStatus, (newCodes, newTree))
-  where result = evaluateTree (head children) (head childrenTree) environment codes
-        nextResult = if statusFrom result == Success then sequenceFunc (tail children) lastStatus (tail childrenTree) environment (codesFrom result)
-          else (Invalid, (codes, tail childrenTree))
-        newStatus = if statusFrom result == Success then statusFromC nextResult
-          else statusFrom result
-        newCodes = if statusFrom result == Success then codesFromC nextResult
-          else codesFrom result
-        newTree = treeFrom result : treeFromC nextResult
-
-
-parallelBase :: [Node] -> NodeStatus -> [LastRunStatusTree] -> Environment -> Codes -> ([NodeStatus], (Codes, [LastRunStatusTree]))
-parallelBase children lastStatus childrenTree environment codes
-  | null children = ([], (codes, []))
-  | otherwise = (newStatuses, (newCodes, newTree))
-  where result = evaluateTree (head children) (head childrenTree) environment codes
-        nextResult = parallelBase (tail children) lastStatus (tail childrenTree) environment (fst (snd result))
-        newStatuses = statusFrom result : fst nextResult
-        newCodes = fst (snd nextResult)
-        newTree = treeFrom result : snd (snd nextResult)
-
-parallelCreator :: ([NodeStatus] -> NodeStatus) -> ([Node] -> NodeStatus -> [LastRunStatusTree] -> Environment -> Codes -> StatusCodeRunningchildren)
+parallelCreator :: ([NodeStatus] -> NodeStatus) -> ([Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput)
 parallelCreator conditionFunction = parallelFunc
-  where parallelFunc children lastStatus childrenTree environment codes = (newStatus, (newCodes, newTree))
-          where result = parallelBase children lastStatus childrenTree environment codes
-                newStatus = conditionFunction (fst result)
-                newCodes = fst (snd result)
-                newTree = snd (snd result)
-                
+  where parallelFunc children memoryStatus memoryTree partialStatus partialTree environment codes = (conditionFunction (getStatus result),
+                                                                                                     getCodes result,
+                                                                                                     getTreeEnvironment result,
+                                                                                                     getMemory result,
+                                                                                                     getPartial result)
+          where result = parallelBase children memoryStatus memoryTree partialStatus partialTree environment codes
+
+parallelMemoryCreator :: ([NodeStatus] -> NodeStatus) -> ([Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput)
+parallelMemoryCreator conditionFunction = parallelFunc
+  where parallelFunc children memoryStatus memoryTree partialStatus partialTree environment codes = (conditionFunction (getStatus result),
+                                                                                                     getCodes result,
+                                                                                                     getTreeEnvironment result,
+                                                                                                     getMemory result,
+                                                                                                     getPartial result)
+          where result = parallelMemoryBase children memoryStatus memoryTree partialStatus partialTree environment codes
+
+parallelPartialCreator :: ([NodeStatus] -> NodeStatus) -> ([Node] -> NodeStatus -> [MemoryTree] -> NodeStatus -> [MemoryTree] -> Environment -> Codes -> NodeOutput)
+parallelPartialCreator conditionFunction = parallelFunc
+  where parallelFunc children memoryStatus memoryTree partialStatus partialTree environment codes = (conditionFunction (getStatus result),
+                                                                                                     getCodes result,
+                                                                                                     getTreeEnvironment result,
+                                                                                                     getMemory result,
+                                                                                                     getPartial result)
+          where result = parallelPartialBase children memoryStatus memoryTree partialStatus partialTree environment codes
+
+--END OF PARALLEL
+--start of basic parallel templates
 
 isFailure :: NodeStatus -> Bool
 isFailure status
@@ -133,6 +240,11 @@ isRunning status
   | status == Running = True
   | otherwise = False
 
+isSuccess :: NodeStatus -> Bool
+isSuccess status
+  | status == Success = True
+  | otherwise = False
+
 successOnAllFailureOne :: [NodeStatus] -> NodeStatus
 successOnAllFailureOne statuses
   | null statuses = Running
@@ -140,3 +252,16 @@ successOnAllFailureOne statuses
   | any isRunning statuses = Running
   | otherwise = Success
 
+successOnOneFailureOne :: [NodeStatus] -> NodeStatus
+successOnOneFailureOne statuses
+  | null statuses = Running
+  | any isFailure statuses = Failure
+  | any isSuccess statuses = Success
+  | otherwise = Running
+
+successOnOneFailureOnImpossible :: [NodeStatus] -> NodeStatus
+successOnOneFailureOnImpossible statuses
+  | null statuses = Running
+  | any isSuccess statuses = Success
+  | any isRunning statuses = Running
+  | otherwise = Failure
